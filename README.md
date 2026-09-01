@@ -3,6 +3,8 @@
 A semi-automated outbound prospecting pipeline for **VoxAI Agents**.
 Scrapes leads daily from Google Maps and Meta Ads Library, enriches them with AI-generated pain-point analysis and personalized outreach messages, and queues them for human approval before sending.
 
+*Last updated: 2026-09-02*
+
 ## Architecture
 
 ```
