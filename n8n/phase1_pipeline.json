@@ -1,0 +1,398 @@
+{
+  "name": "VoxAI Phase 1 — GMaps Scraper → Supabase → AI Drafts",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 20 * * *"
+            }
+          ]
+        }
+      },
+      "id": "cron-trigger",
+      "name": "Daily 2AM IST Trigger",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [0, 300],
+      "notes": "Runs at 20:30 UTC = 2:00 AM IST. Adjust for your timezone offset."
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $env.SCRAPER_BASE_URL }}/today-queries",
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "id": "get-today-queries",
+      "name": "GET Today's Queries",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [200, 300],
+      "notes": "Fetches today's rotation queries from the Python scraper API."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Phase 1: Pick only the first India query (1 city) for the initial test run.\n// In Phase 2, change this to loop all 30 India queries.\nconst data = $input.first().json;\nconst indiaQueries = data.india || [];\n\n// For Phase 1: take just the first query\nconst selected = indiaQueries.slice(0, 1);\n\nreturn selected.map(q => ({\n  json: {\n    query: q.niche,\n    location: q.city,\n    country: q.country,\n    region: 'india',\n    max_results: 10  // Phase 1: 10 per query. Increase to 30 in Phase 2.\n  }\n}));"
+      },
+      "id": "select-queries",
+      "name": "Select Today's Queries (Phase 1: 1 city)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [400, 300],
+      "notes": "Phase 1: only runs 1 query. Phase 2: change slice(0,1) to loop all."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SCRAPER_BASE_URL }}/scrape/gmaps",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "query",
+              "value": "={{ $json.query }}"
+            },
+            {
+              "name": "location",
+              "value": "={{ $json.location }}"
+            },
+            {
+              "name": "max_results",
+              "value": "={{ $json.max_results }}"
+            },
+            {
+              "name": "region",
+              "value": "={{ $json.region }}"
+            },
+            {
+              "name": "country",
+              "value": "={{ $json.country }}"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 120000
+        }
+      },
+      "id": "call-scraper",
+      "name": "Call GMaps Scraper",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [600, 300],
+      "notes": "Calls /scrape/gmaps on the Python FastAPI service. Timeout 2min — scraping takes time."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Flatten the leads array from the scraper response into individual items.\nconst response = $input.first().json;\nconst leads = response.leads || [];\n\nif (!leads.length) {\n  console.log('No leads returned from scraper.');\n  return [];\n}\n\nconsole.log(`Received ${leads.length} leads from scraper.`);\nreturn leads.map(lead => ({ json: lead }));"
+      },
+      "id": "flatten-leads",
+      "name": "Flatten Leads Array",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [800, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT id, business_name, phone_normalized FROM leads WHERE phone_normalized = '{{ $json.phone_normalized }}' AND country = '{{ $json.country }}' LIMIT 1",
+        "options": {}
+      },
+      "id": "check-duplicate-phone",
+      "name": "Dedupe: Check Phone in Supabase",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [1000, 300],
+      "credentials": {
+        "postgres": {
+          "name": "Supabase Postgres"
+        }
+      },
+      "notes": "Uses direct Postgres connection. In n8n: add Supabase DB credentials under Credentials > Postgres."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.length }}",
+              "rightValue": 0,
+              "operator": {
+                "type": "number",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "is-new-lead",
+      "name": "Is New Lead?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1200, 300],
+      "notes": "true = no duplicate found → proceed. false = duplicate → log and discard."
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO dedupe_log (business_name, phone_raw, country, source, reason) VALUES ('{{ $json.business_name }}', '{{ $json.phone_raw }}', '{{ $json.country }}', '{{ $json.source }}', 'phone_match')",
+        "options": {}
+      },
+      "id": "log-duplicate",
+      "name": "Log Duplicate to dedupe_log",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [1400, 500],
+      "credentials": {
+        "postgres": {
+          "name": "Supabase Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO leads (business_name, category, phone_raw, phone_normalized, address, website, has_website, rating, review_count, source, region, country, preferred_language, status)\nVALUES (\n  '{{ $json.business_name.replace(/'/g, \"''\") }}',\n  '{{ $json.category }}',\n  '{{ $json.phone_raw }}',\n  '{{ $json.phone_normalized }}',\n  '{{ ($json.address || \"\").replace(/'/g, \"''\") }}',\n  {{ $json.website ? \"'\" + $json.website + \"'\" : 'NULL' }},\n  {{ $json.website ? 'TRUE' : 'FALSE' }},\n  {{ $json.rating ?? 'NULL' }},\n  {{ $json.review_count ?? 'NULL' }},\n  '{{ $json.source }}',\n  '{{ $json.region }}',\n  '{{ $json.country }}',\n  {{ $json.country === 'IN' ? \"'hinglish'\" : \"'english'\" }},\n  'pending_approval'\n)\nRETURNING id",
+        "options": {}
+      },
+      "id": "insert-lead",
+      "name": "Insert Lead into Supabase",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [1400, 200],
+      "credentials": {
+        "postgres": {
+          "name": "Supabase Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Build the pain-point detection prompt\nconst lead = $('flatten-leads').first().json;\nconst leadId = $input.first().json[0]?.id;\n\nconst systemPrompt = `You are a B2B sales researcher for VoxAI Agents, a company that builds AI-powered WhatsApp agents, Voice AI agents, and business automation systems for other businesses.\n\nAnalyze the following business and identify:\n1. Their most likely customer-communication pain point.\n2. The single most compelling, specific angle to open a cold outreach conversation.\n\nImportant regional context:\n- india: WhatsApp is the primary business channel; manual handling of enquiries is common.\n- AE/QA/SA (Gulf): Higher-value transactions; WhatsApp widely used; owners are decision-makers.\n- SG: English-first, efficiency matters, quality of customer service is key.\nDo NOT mix regional assumptions across countries.\n\nRespond ONLY in this JSON format, no preamble:\n{\n  \"pain_point\": \"short description (max 20 words)\",\n  \"angle\": \"specific opening angle referencing something concrete (max 40 words)\",\n  \"confidence\": \"high | medium | low\"\n}`;\n\nconst userContent = `Business details:\n- Name: ${lead.business_name}\n- Category: ${lead.category || 'Unknown'}\n- Region: ${lead.region} (${lead.country})\n- Has website: ${lead.has_website}\n- Website content: ${lead.website_text_excerpt || 'N/A'}\n- Running ads: ${lead.is_running_ads || false}\n- Ad copy: ${lead.ad_copy || 'N/A'}\n- Rating/reviews: ${lead.rating || 'N/A'} (${lead.review_count || 0} reviews)`;\n\nreturn [{\n  json: {\n    lead_id: leadId,\n    lead: lead,\n    system_prompt: systemPrompt,\n    user_content: userContent\n  }\n}];"
+      },
+      "id": "build-pain-point-prompt",
+      "name": "Build Pain-Point Prompt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1600, 200]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.groq.com/openai/v1/chat/completions",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "=Bearer {{ $env.GROQ_API_KEY }}" },
+            { "name": "Content-Type",   "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"llama-3.3-70b-versatile\",\n  \"max_tokens\": 400,\n  \"temperature\": 0.3,\n  \"messages\": [\n    { \"role\": \"system\", \"content\": \"{{ $json.system_prompt }}\" },\n    { \"role\": \"user\",   \"content\": \"{{ $json.user_content }}\" }\n  ]\n}",
+        "options": { "timeout": 30000 }
+      },
+      "id": "call-claude-pain-point",
+      "name": "Groq: Pain-Point Detection",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1800, 200],
+      "notes": "Uses Groq free tier — llama-3.3-70b-versatile. Add GROQ_API_KEY to n8n env vars. Free: 14,400 calls/day."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parse Groq response for pain-point (OpenAI format: choices[0].message.content)\nconst response = $input.first().json;\nconst rawText = response.choices?.[0]?.message?.content || '{}';\n\nlet parsed = {};\ntry {\n  const cleaned = rawText.replace(/```json\\n?/g, '').replace(/```\\n?/g, '').trim();\n  parsed = JSON.parse(cleaned);\n} catch (e) {\n  console.error('Failed to parse Groq pain-point response:', rawText);\n  parsed = { pain_point: 'Unable to determine', angle: 'Unable to determine', confidence: 'low' };\n}\n\nconst prev = $('build-pain-point-prompt').first().json;\nreturn [{ json: { ...prev, pain_point: parsed.pain_point || '', angle: parsed.angle || '', confidence: parsed.confidence || 'low' } }];"
+      },
+      "id": "parse-pain-point",
+      "name": "Parse Pain-Point Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2000, 200]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Build the WhatsApp message drafting prompt\nconst data = $input.first().json;\nconst lead = data.lead;\n\nconst toneMap = {\n  IN: \"Casual, Hinglish-friendly where natural — like messaging a fellow business owner on WhatsApp, not writing a formal email. Keep it warm and direct.\",\n  AE: \"Professional English, respectful and direct. No slang. Gulf business culture values formality and clarity. Keep it crisp.\",\n  QA: \"Professional English, respectful and direct. No slang. Gulf business culture values formality and clarity. Keep it crisp.\",\n  SA: \"Professional English, respectful and direct. No slang. Saudi business culture values relationship and trust. Be polite and clear.\",\n  SG: \"Professional English, concise and efficiency-focused. Singapore SMEs value speed and directness. Get to the point fast.\"\n};\nconst tone = toneMap[lead.country] || \"Professional English.\";\n\nconst systemPrompt = `Write a short, casual, first-touch WhatsApp outreach message to a business owner.\n\nRules:\n- Under 400 characters total.\n- Do NOT open with \"Hi, we offer...\" or any generic pitch.\n- Do NOT mention \"AI\" or \"automation\" explicitly — focus on the pain point and outcome.\n- Open with something specific referencing their business (use the angle below).\n- Ask one question at the end — the goal is a reply, not a sale.\n- Tone: ${tone}\n- Max 1 emoji (optional). No excessive punctuation.\n- Do not sign off with a company name or website link.\n\nOutput ONLY the message text. No quotes, no preamble.`;\n\nconst userContent = `Business: ${lead.business_name} (${lead.category}, ${lead.region}, ${lead.country})\nPain point: ${data.pain_point}\nAngle: ${data.angle}`;\n\nreturn [{\n  json: {\n    ...data,\n    wa_system_prompt: systemPrompt,\n    wa_user_content: userContent\n  }\n}];"
+      },
+      "id": "build-wa-draft-prompt",
+      "name": "Build WhatsApp Draft Prompt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2200, 200]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.groq.com/openai/v1/chat/completions",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "=Bearer {{ $env.GROQ_API_KEY }}" },
+            { "name": "Content-Type",   "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"llama-3.3-70b-versatile\",\n  \"max_tokens\": 200,\n  \"temperature\": 0.7,\n  \"messages\": [\n    { \"role\": \"system\", \"content\": \"{{ $json.wa_system_prompt }}\" },\n    { \"role\": \"user\",   \"content\": \"{{ $json.wa_user_content }}\" }\n  ]\n}",
+        "options": { "timeout": 30000 }
+      },
+      "id": "call-claude-wa-draft",
+      "name": "Groq: Draft WhatsApp Message",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2400, 200]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parse Groq WA draft response (OpenAI format) and build wa.me deep link\nconst response = $input.first().json;\nconst waDraft = (response.choices?.[0]?.message?.content || '').trim();\n\nconst prev = $('build-wa-draft-prompt').first().json;\nconst lead = prev.lead;\n\nlet waDeepLink = null;\nif (lead.phone_normalized) {\n  const numericPhone = lead.phone_normalized.replace('+', '');\n  waDeepLink = `https://wa.me/${numericPhone}?text=${encodeURIComponent(waDraft)}`;\n}\n\nreturn [{ json: {\n  lead_id: prev.lead_id,\n  pain_point: prev.pain_point,\n  angle: prev.angle,\n  confidence: prev.confidence,\n  whatsapp_draft: waDraft,\n  whatsapp_deep_link: waDeepLink,\n  low_confidence_flag: prev.confidence === 'low'\n} }];"
+      },
+      "id": "parse-wa-draft",
+      "name": "Parse WA Draft + Build Deep Link",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2600, 200]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE leads SET\n  pain_point = '{{ $json.pain_point.replace(/'/g, \"''\") }}',\n  angle = '{{ $json.angle.replace(/'/g, \"''\") }}',\n  confidence = '{{ $json.confidence }}',\n  whatsapp_draft = '{{ $json.whatsapp_draft.replace(/'/g, \"''\") }}',\n  whatsapp_deep_link = '{{ $json.whatsapp_deep_link }}',\n  status = 'pending_approval',\n  enriched_at = NOW()\nWHERE id = '{{ $json.lead_id }}'",
+        "options": {}
+      },
+      "id": "update-lead-with-ai",
+      "name": "Update Lead: AI Outputs + Status",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [2800, 200],
+      "credentials": {
+        "postgres": {
+          "name": "Supabase Postgres"
+        }
+      },
+      "notes": "Writes pain_point, angle, confidence, whatsapp_draft, deep_link, and sets status=pending_approval."
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO scrape_runs (source, region, query, location, country, leads_found, leads_inserted)\nVALUES ('gmaps', 'india', 'phase1_run', 'phase1_location', 'IN', 0, 0)",
+        "options": {}
+      },
+      "id": "log-scrape-run",
+      "name": "Log Scrape Run",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [3000, 200],
+      "credentials": {
+        "postgres": {
+          "name": "Supabase Postgres"
+        }
+      },
+      "notes": "Phase 2: update this to log actual counts per run."
+    }
+  ],
+  "connections": {
+    "Daily 2AM IST Trigger": {
+      "main": [
+        [{ "node": "GET Today's Queries", "type": "main", "index": 0 }]
+      ]
+    },
+    "GET Today's Queries": {
+      "main": [
+        [{ "node": "Select Today's Queries (Phase 1: 1 city)", "type": "main", "index": 0 }]
+      ]
+    },
+    "Select Today's Queries (Phase 1: 1 city)": {
+      "main": [
+        [{ "node": "Call GMaps Scraper", "type": "main", "index": 0 }]
+      ]
+    },
+    "Call GMaps Scraper": {
+      "main": [
+        [{ "node": "Flatten Leads Array", "type": "main", "index": 0 }]
+      ]
+    },
+    "Flatten Leads Array": {
+      "main": [
+        [{ "node": "Dedupe: Check Phone in Supabase", "type": "main", "index": 0 }]
+      ]
+    },
+    "Dedupe: Check Phone in Supabase": {
+      "main": [
+        [{ "node": "Is New Lead?", "type": "main", "index": 0 }]
+      ]
+    },
+    "Is New Lead?": {
+      "main": [
+        [{ "node": "Insert Lead into Supabase", "type": "main", "index": 0 }],
+        [{ "node": "Log Duplicate to dedupe_log", "type": "main", "index": 0 }]
+      ]
+    },
+    "Insert Lead into Supabase": {
+      "main": [
+        [{ "node": "Build Pain-Point Prompt", "type": "main", "index": 0 }]
+      ]
+    },
+    "Build Pain-Point Prompt": {
+      "main": [
+        [{ "node": "Claude: Pain-Point Detection", "type": "main", "index": 0 }]
+      ]
+    },
+    "Claude: Pain-Point Detection": {
+      "main": [
+        [{ "node": "Parse Pain-Point Response", "type": "main", "index": 0 }]
+      ]
+    },
+    "Parse Pain-Point Response": {
+      "main": [
+        [{ "node": "Build WhatsApp Draft Prompt", "type": "main", "index": 0 }]
+      ]
+    },
+    "Build WhatsApp Draft Prompt": {
+      "main": [
+        [{ "node": "Claude: Draft WhatsApp Message", "type": "main", "index": 0 }]
+      ]
+    },
+    "Claude: Draft WhatsApp Message": {
+      "main": [
+        [{ "node": "Parse WA Draft + Build Deep Link", "type": "main", "index": 0 }]
+      ]
+    },
+    "Parse WA Draft + Build Deep Link": {
+      "main": [
+        [{ "node": "Update Lead: AI Outputs + Status", "type": "main", "index": 0 }]
+      ]
+    },
+    "Update Lead: AI Outputs + Status": {
+      "main": [
+        [{ "node": "Log Scrape Run", "type": "main", "index": 0 }]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": ""
+  },
+  "staticData": null,
+  "tags": ["voxai", "phase1", "outbound"],
+  "_meta": {
+    "instanceId": "replace-with-your-n8n-instance-id"
+  }
+}

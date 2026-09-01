@@ -1,0 +1,198 @@
+{
+  "name": "VoxAI Phase 3 — Follow-up Automation + Hot Lead Alerts",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [{ "field": "cronExpression", "expression": "0 4 * * *" }]
+        }
+      },
+      "id": "followup-cron",
+      "name": "Daily 9:30AM IST Follow-up Check",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [0, 300],
+      "notes": "4:00 UTC = 9:30 AM IST. Runs separately from the main 2AM pipeline."
+    },
+
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT id, business_name, category, region, country, phone_normalized, whatsapp_deep_link, pain_point, angle, follow_up_count, sent_at, preferred_language FROM follow_up_due LIMIT 50",
+        "options": {}
+      },
+      "id": "fetch-followup-due",
+      "name": "Fetch Follow-up Due Leads",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [200, 300],
+      "credentials": { "postgres": { "name": "Supabase Postgres" } },
+      "notes": "Uses the follow_up_due view from schema.sql — leads sent >3 days ago with no reply and <3 follow-ups."
+    },
+
+    {
+      "parameters": {
+        "conditions": {
+          "conditions": [
+            {
+              "leftValue": "={{ $input.all().length }}",
+              "rightValue": 0,
+              "operator": { "type": "number", "operation": "largerThan" }
+            }
+          ]
+        }
+      },
+      "id": "has-followups",
+      "name": "Any Follow-ups Due?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [400, 300]
+    },
+
+    {
+      "parameters": {
+        "jsCode": "// Build follow-up drafting prompt — do NOT repeat the original message\nconst lead = $input.first().json;\nconst daysSinceSent = Math.floor((Date.now() - new Date(lead.sent_at).getTime()) / 86400000);\n\nconst toneMap = {\n  IN: 'Casual, warm, Hinglish-friendly where natural.',\n  AE: 'Professional English, polite and direct.',\n  QA: 'Professional English, polite and direct.',\n  SA: 'Professional English, respectful and relationship-focused.',\n  SG: 'Professional English, concise and efficient.'\n};\nconst tone = toneMap[lead.country] || 'Professional English.';\n\nconst systemPrompt = `Write a gentle follow-up WhatsApp message for a business owner who has not replied to an initial outreach message sent ${daysSinceSent} days ago.\n\nRules:\n- Under 300 characters.\n- Do NOT repeat or paraphrase the original message.\n- Do NOT say \"following up\" or \"just checking in\" explicitly — keep it light and different.\n- Tone: ${tone}\n- No emojis. End with a question or an easy invitation to reply.\n- This is follow-up #${(lead.follow_up_count || 0) + 1} — adjust lightness/brevity accordingly.\n\nOutput ONLY the follow-up message text. No quotes, no preamble.`;\n\nconst userContent = `Business: ${lead.business_name} (${lead.category}, ${lead.region})\nOriginal pain point: ${lead.pain_point}\nOriginal angle: ${lead.angle}`;\n\nreturn [{ json: { ...lead, days_since_sent: daysSinceSent, fu_system_prompt: systemPrompt, fu_user_content: userContent } }];"
+      },
+      "id": "build-followup-prompt",
+      "name": "Build Follow-up Prompt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [600, 200]
+    },
+
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.groq.com/openai/v1/chat/completions",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "=Bearer {{ $env.GROQ_API_KEY }}" },
+            { "name": "content-type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"llama-3.3-70b-versatile\",\n  \"max_tokens\": 150,\n  \"system\": {{ JSON.stringify($json.fu_system_prompt) }},\n  \"messages\": [{ \"role\": \"user\", \"content\": {{ JSON.stringify($json.fu_user_content) }} }]\n}",
+        "options": { "timeout": 30000 }
+      },
+      "id": "claude-followup",
+      "name": "Claude: Draft Follow-up",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [800, 200]
+    },
+
+    {
+      "parameters": {
+        "jsCode": "const response = $input.first().json;\nconst fuDraft = (response.choices?.[0]?.message?.content || '').trim();\nconst prev = $('build-followup-prompt').first().json;\n\n// Build wa.me deep link for the follow-up\nlet waDeepLink = null;\nif (prev.phone_normalized) {\n  const numericPhone = prev.phone_normalized.replace('+', '');\n  waDeepLink = `https://wa.me/${numericPhone}?text=${encodeURIComponent(fuDraft)}`;\n}\n\nreturn [{ json: { ...prev, fu_draft: fuDraft, fu_deep_link: waDeepLink } }];"
+      },
+      "id": "parse-followup",
+      "name": "Parse Follow-up Draft",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1000, 200]
+    },
+
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "=INSERT INTO leads (\n  business_name, category, region, country, phone_normalized, preferred_language,\n  pain_point, angle, whatsapp_draft, whatsapp_deep_link,\n  source, record_type, parent_lead_id,\n  status\n) VALUES (\n  '{{ ($json.business_name || '').replace(/'/g, \"''\") }}',\n  '{{ $json.category || '' }}',\n  '{{ $json.region }}',\n  '{{ $json.country }}',\n  '{{ $json.phone_normalized }}',\n  '{{ $json.preferred_language || 'english' }}',\n  '{{ ($json.pain_point || '').replace(/'/g, \"''\") }}',\n  '{{ ($json.angle || '').replace(/'/g, \"''\") }}',\n  '{{ ($json.fu_draft || '').replace(/'/g, \"''\") }}',\n  {{ $json.fu_deep_link ? \"'\" + $json.fu_deep_link + \"'\" : 'NULL' }},\n  'followup',\n  'follow_up',\n  '{{ $json.id }}',\n  'pending_approval'\n);\n\nUPDATE leads\nSET follow_up_count = follow_up_count + 1\nWHERE id = '{{ $json.id }}'",
+        "options": {}
+      },
+      "id": "insert-followup",
+      "name": "Insert Follow-up into Approval Queue",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [1200, 200],
+      "credentials": { "postgres": { "name": "Supabase Postgres" } },
+      "notes": "Creates a child record (record_type=follow_up) linked to the parent. Also increments follow_up_count on the parent."
+    },
+
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT id, business_name, category, region, country, phone_normalized, whatsapp_deep_link, replied_at FROM leads WHERE status = 'hot_lead' AND replied_at > NOW() - INTERVAL '1 hour' ORDER BY replied_at DESC",
+        "options": {}
+      },
+      "id": "check-hot-leads",
+      "name": "Check for New Hot Leads",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [200, 600],
+      "credentials": { "postgres": { "name": "Supabase Postgres" } },
+      "notes": "Runs on the same cron. Finds leads marked hot_lead in the last hour."
+    },
+
+    {
+      "parameters": {
+        "conditions": {
+          "conditions": [
+            {
+              "leftValue": "={{ $input.all().length }}",
+              "rightValue": 0,
+              "operator": { "type": "number", "operation": "largerThan" }
+            }
+          ]
+        }
+      },
+      "id": "has-hot-leads",
+      "name": "Any New Hot Leads?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [400, 600]
+    },
+
+    {
+      "parameters": {
+        "jsCode": "// Format hot lead notification message\nconst hotLeads = $input.all().map(item => item.json);\nconst lines = hotLeads.map(l =>\n  `🔥 *${l.business_name}* (${l.category}, ${l.country})\\n📱 ${l.phone_normalized || 'No phone'}\\n🔗 ${l.whatsapp_deep_link || 'No WA link'}`\n).join('\\n\\n');\n\nreturn [{ json: { notification_text: `🚨 *VoxAI Hot Leads Alert*\\n\\n${lines}\\n\\nReply now while intent is high!` } }];"
+      },
+      "id": "format-hot-lead-alert",
+      "name": "Format Hot Lead Alert",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [600, 600]
+    },
+
+    {
+      "parameters": {
+        "authentication": "oAuth2",
+        "chatId": "={{ $env.TELEGRAM_CHAT_ID }}",
+        "text": "={{ $json.notification_text }}",
+        "additionalFields": { "parse_mode": "Markdown" }
+      },
+      "id": "telegram-alert",
+      "name": "Send Telegram Hot Lead Alert",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [800, 600],
+      "credentials": { "telegramApi": { "name": "Telegram Bot" } },
+      "notes": "Replace with WhatsApp/email notification if you prefer. Set TELEGRAM_CHAT_ID and Telegram Bot credentials in n8n."
+    }
+  ],
+
+  "connections": {
+    "Daily 9:30AM IST Follow-up Check": { "main": [[
+      { "node": "Fetch Follow-up Due Leads", "type": "main", "index": 0 },
+      { "node": "Check for New Hot Leads", "type": "main", "index": 0 }
+    ]]},
+    "Fetch Follow-up Due Leads":  { "main": [[{ "node": "Any Follow-ups Due?", "type": "main", "index": 0 }]] },
+    "Any Follow-ups Due?": { "main": [
+      [{ "node": "Build Follow-up Prompt", "type": "main", "index": 0 }],
+      []
+    ]},
+    "Build Follow-up Prompt":     { "main": [[{ "node": "Claude: Draft Follow-up", "type": "main", "index": 0 }]] },
+    "Claude: Draft Follow-up":    { "main": [[{ "node": "Parse Follow-up Draft", "type": "main", "index": 0 }]] },
+    "Parse Follow-up Draft":      { "main": [[{ "node": "Insert Follow-up into Approval Queue", "type": "main", "index": 0 }]] },
+    "Check for New Hot Leads":    { "main": [[{ "node": "Any New Hot Leads?", "type": "main", "index": 0 }]] },
+    "Any New Hot Leads?": { "main": [
+      [{ "node": "Format Hot Lead Alert", "type": "main", "index": 0 }],
+      []
+    ]},
+    "Format Hot Lead Alert":      { "main": [[{ "node": "Send Telegram Hot Lead Alert", "type": "main", "index": 0 }]] }
+  },
+
+  "settings": { "executionOrder": "v1", "saveManualExecutions": true },
+  "tags": ["voxai", "phase3", "followup"],
+  "_meta": { "instanceId": "replace-with-your-n8n-instance-id" }
+}

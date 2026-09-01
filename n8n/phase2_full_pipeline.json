@@ -1,0 +1,584 @@
+{
+  "name": "VoxAI Phase 2 — Full 100/day Pipeline (GMaps + Meta Ads + Enrichment + Intl)",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [{ "field": "cronExpression", "expression": "0 20 * * *" }]
+        }
+      },
+      "id": "cron-trigger",
+      "name": "Daily 2AM IST Trigger",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [0, 400]
+    },
+
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $env.SCRAPER_BASE_URL }}/today-queries",
+        "options": { "timeout": 10000 }
+      },
+      "id": "get-today-queries",
+      "name": "GET Today's Queries",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [200, 400]
+    },
+
+    {
+      "parameters": {
+        "jsCode": "// Split today's queries into 4 branches:\n// 1. India GMaps (30), 2. India Meta Ads (30 keywords)\n// 3. International GMaps (20), 4. International Meta Ads (20 keywords)\nconst data = $input.first().json;\nconst indiaQueries = data.india || [];\nconst intlQueries = data.international || [];\n\n// Pass all as a single item for branching\nreturn [{\n  json: {\n    india_queries: indiaQueries,\n    intl_queries: intlQueries,\n    india_count: indiaQueries.length,\n    intl_count: intlQueries.length\n  }\n}];"
+      },
+      "id": "prep-branches",
+      "name": "Prepare Branch Data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [400, 400]
+    },
+
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SCRAPER_BASE_URL }}/scrape/gmaps/batch",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [{ "name": "Content-Type", "value": "application/json" }]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"queries\": {{ JSON.stringify($json.india_queries.map(q => ({\n    query: q.niche,\n    location: q.city,\n    max_results: 1,\n    region: 'india',\n    country: q.country\n  }))) }}\n}",
+        "options": { "timeout": 600000 }
+      },
+      "id": "gmaps-india-batch",
+      "name": "GMaps Batch — India (30)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [600, 200],
+      "notes": "max_results:1 per query × 30 queries = 30 India leads. Increase max_results when comfortable."
+    },
+
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SCRAPER_BASE_URL }}/scrape/gmaps/batch",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [{ "name": "Content-Type", "value": "application/json" }]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"queries\": {{ JSON.stringify($json.intl_queries.map(q => ({\n    query: q.niche,\n    location: q.city,\n    max_results: 1,\n    region: 'intl',\n    country: q.country\n  }))) }}\n}",
+        "options": { "timeout": 600000 }
+      },
+      "id": "gmaps-intl-batch",
+      "name": "GMaps Batch — International (20)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [600, 400]
+    },
+
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.apify.com/v2/acts/apify~facebook-ads-scraper/runs",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type", "value": "application/json" },
+            { "name": "Authorization", "value": "=Bearer {{ $env.APIFY_API_TOKEN }}" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"countryCode\": \"IN\",\n  \"searchTerms\": {{ JSON.stringify(($('prep-branches').first().json.india_queries || []).slice(0, 10).map(q => q.niche)) }},\n  \"activeStatus\": \"active\",\n  \"maxItems\": 30,\n  \"proxyConfiguration\": { \"useApifyProxy\": true }\n}",
+        "options": { "timeout": 30000 }
+      },
+      "id": "apify-meta-india-start",
+      "name": "Apify: Start Meta Ads Run — India",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [600, 600],
+      "notes": "Starts async Apify run. Next node polls for completion."
+    },
+
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.apify.com/v2/acts/apify~facebook-ads-scraper/runs",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type", "value": "application/json" },
+            { "name": "Authorization", "value": "=Bearer {{ $env.APIFY_API_TOKEN }}" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"countryCodes\": [\"AE\", \"QA\", \"SA\", \"SG\"],\n  \"searchTerms\": {{ JSON.stringify(($('prep-branches').first().json.intl_queries || []).slice(0, 10).map(q => q.niche)) }},\n  \"activeStatus\": \"active\",\n  \"maxItems\": 20,\n  \"proxyConfiguration\": { \"useApifyProxy\": true }\n}",
+        "options": { "timeout": 30000 }
+      },
+      "id": "apify-meta-intl-start",
+      "name": "Apify: Start Meta Ads Run — International",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [600, 800]
+    },
+
+    {
+      "parameters": {
+        "amount": 90,
+        "unit": "seconds"
+      },
+      "id": "wait-apify",
+      "name": "Wait 90s for Apify Runs",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [800, 700]
+    },
+
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "=https://api.apify.com/v2/acts/apify~facebook-ads-scraper/runs/{{ $('apify-meta-india-start').first().json.data.id }}/dataset/items",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [{ "name": "Authorization", "value": "=Bearer {{ $env.APIFY_API_TOKEN }}" }]
+        },
+        "options": {}
+      },
+      "id": "apify-meta-india-results",
+      "name": "Fetch Apify India Results",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1000, 600]
+    },
+
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "=https://api.apify.com/v2/acts/apify~facebook-ads-scraper/runs/{{ $('apify-meta-intl-start').first().json.data.id }}/dataset/items",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [{ "name": "Authorization", "value": "=Bearer {{ $env.APIFY_API_TOKEN }}" }]
+        },
+        "options": {}
+      },
+      "id": "apify-meta-intl-results",
+      "name": "Fetch Apify International Results",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1000, 800]
+    },
+
+    {
+      "parameters": {
+        "jsCode": "// Normalize all 4 sources into a unified lead array\n// Sources: gmaps_india, gmaps_intl, meta_india, meta_intl\n\nconst gmapsIndia = ($('gmaps-india-batch').first().json.leads || []);\nconst gmapsIntl  = ($('gmaps-intl-batch').first().json.leads || []);\n\n// Normalize Meta Ads results to the same schema\nfunction normalizeMetaAd(ad, region, country) {\n  const waLink = ad.whatsapp_click_to_chat_link || ad.link_url || null;\n  let rawPhone = null;\n  if (waLink) {\n    const phoneMatch = waLink.match(/\\d{10,15}/);\n    rawPhone = phoneMatch ? phoneMatch[0] : null;\n  }\n  return {\n    business_name: ad.pageName || ad.page_name || '',\n    category: ad.category || 'Unknown',\n    phone_raw: rawPhone,\n    phone_normalized: null, // normalized in next step\n    address: null,\n    website: ad.link_url || ad.page_website || null,\n    has_website: !!(ad.link_url || ad.page_website),\n    rating: null,\n    review_count: null,\n    source: 'meta_ads',\n    region: region,\n    country: country || 'IN',\n    ad_copy: ad.body_text || ad.ad_copy || null,\n    original_ad_language: ad.language_detected || ad.language || null,\n    is_running_ads: true,\n    scraped_at: new Date().toISOString()\n  };\n}\n\nconst metaIndia = ($('apify-meta-india-results').first().json || []).map(ad => normalizeMetaAd(ad, 'india', 'IN'));\nconst metaIntl  = ($('apify-meta-intl-results').first().json || []).map(ad => {\n  // Determine country from page location if available, else default AE\n  const country = (ad.country || ad.country_code || 'AE').toUpperCase();\n  return normalizeMetaAd(ad, 'intl', country);\n});\n\nconst allLeads = [...gmapsIndia, ...gmapsIntl, ...metaIndia, ...metaIntl];\nconsole.log(`Total leads collected: ${allLeads.length} (GMaps India: ${gmapsIndia.length}, GMaps Intl: ${gmapsIntl.length}, Meta India: ${metaIndia.length}, Meta Intl: ${metaIntl.length})`);\n\nreturn allLeads.map(lead => ({ json: lead }));"
+      },
+      "id": "merge-all-sources",
+      "name": "Merge All 4 Sources",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1200, 500]
+    },
+
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "=SELECT check_lead_duplicate('{{ $json.phone_normalized }}', '{{ $json.business_name.replace(/'/g, \"''\") }}', '{{ $json.country }}') AS result",
+        "options": {}
+      },
+      "id": "dedupe-check",
+      "name": "Dedupe: Phone + Fuzzy Name Check",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [1400, 500],
+      "credentials": { "postgres": { "name": "Supabase Postgres" } },
+      "notes": "Calls the check_lead_duplicate() SQL function from supabase/functions.sql"
+    },
+
+    {
+      "parameters": {
+        "conditions": {
+          "conditions": [
+            {
+              "leftValue": "={{ $json.result?.is_duplicate }}",
+              "rightValue": false,
+              "operator": { "type": "boolean", "operation": "equals" }
+            }
+          ]
+        }
+      },
+      "id": "is-new-lead",
+      "name": "Is New Lead?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1600, 500]
+    },
+
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "=INSERT INTO dedupe_log (business_name, phone_raw, country, source, reason, matched_lead_id)\nVALUES (\n  '{{ $json.business_name?.replace(/'/g, \"''\") }}',\n  '{{ $json.phone_raw }}',\n  '{{ $json.country }}',\n  '{{ $json.source }}',\n  '{{ $json.result?.reason }}',\n  '{{ $json.result?.matched_lead_id }}'\n)",
+        "options": {}
+      },
+      "id": "log-duplicate",
+      "name": "Log Duplicate",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [1800, 700],
+      "credentials": { "postgres": { "name": "Supabase Postgres" } }
+    },
+
+    {
+      "parameters": {
+        "jsCode": "// Language tagging + preferred_language assignment\nconst lead = $input.first().json;\n\n// India leads: hinglish unless website/ad copy is purely formal English\nlet preferred_language = 'english';\nif (lead.country === 'IN') {\n  // Default India to hinglish; override only if ad copy is purely formal English\n  const textToCheck = lead.ad_copy || lead.website_text_excerpt || '';\n  // Simple heuristic: if no Devanagari chars and no common Hinglish words, use english\n  const hasDevanagari = /[\\u0900-\\u097F]/.test(textToCheck);\n  const hinglishWords = ['aap', 'karo', 'hai', 'hain', 'nahi', 'bahut', 'abhi'];\n  const hasHinglish = hinglishWords.some(w => textToCheck.toLowerCase().includes(w));\n  preferred_language = (hasDevanagari || hasHinglish) ? 'hinglish' : 'hinglish'; // default hinglish for IN\n}\n\nreturn [{ json: { ...lead, preferred_language } }];"
+      },
+      "id": "language-tag",
+      "name": "Language Tagging",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1800, 300]
+    },
+
+    {
+      "parameters": {
+        "conditions": {
+          "conditions": [
+            {
+              "leftValue": "={{ $json.website }}",
+              "rightValue": "",
+              "operator": { "type": "string", "operation": "isNotEmpty" }
+            }
+          ]
+        }
+      },
+      "id": "has-website-check",
+      "name": "Has Website?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [2000, 300]
+    },
+
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SCRAPER_BASE_URL }}/enrich/website",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [{ "name": "Content-Type", "value": "application/json" }]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={ \"url\": \"{{ $json.website }}\" }",
+        "options": { "timeout": 15000 }
+      },
+      "id": "enrich-website",
+      "name": "Enrich Website",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2200, 200]
+    },
+
+    {
+      "parameters": {
+        "jsCode": "// Merge website enrichment data back onto the lead\nconst enrichment = $input.first().json;\nconst lead = $('has-website-check').first().json;\n\nreturn [{\n  json: {\n    ...lead,\n    website_text_excerpt: enrichment.body_text_excerpt || null,\n    has_chat_widget: enrichment.has_chat_widget || false,\n    chat_widgets_found: enrichment.chat_widgets_found || [],\n    website_title: enrichment.title || null,\n    website_fetch_success: enrichment.fetch_success\n  }\n}];"
+      },
+      "id": "merge-website-data",
+      "name": "Merge Website Enrichment",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2400, 200]
+    },
+
+    {
+      "parameters": {
+        "jsCode": "// Decision-maker lookup via Serper.dev Google X-ray search\n// Searches: \"[business name]\" founder OR owner OR director site:linkedin.com/in\nconst lead = $input.first().json;\n\nreturn [{\n  json: {\n    ...lead,\n    serper_query: `\"${lead.business_name}\" founder OR owner OR director site:linkedin.com/in`\n  }\n}];"
+      },
+      "id": "build-serper-query",
+      "name": "Build Serper Search Query",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2600, 300]
+    },
+
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://google.serper.dev/search",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "X-API-KEY", "value": "={{ $env.SERPER_API_KEY }}" },
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"q\": \"{{ $json.serper_query }}\",\n  \"num\": 3\n}",
+        "options": { "timeout": 10000 }
+      },
+      "id": "serper-search",
+      "name": "Serper.dev: LinkedIn Lookup",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2800, 300]
+    },
+
+    {
+      "parameters": {
+        "jsCode": "// Parse Serper results to extract LinkedIn profile URL + name\nconst serperResp = $input.first().json;\nconst lead = $('build-serper-query').first().json;\n\nlet decision_maker_name = null;\nlet decision_maker_linkedin = null;\n\ntry {\n  const results = serperResp.organic || [];\n  for (const result of results) {\n    const url = result.link || '';\n    if (url.includes('linkedin.com/in/')) {\n      decision_maker_linkedin = url;\n      // Extract name from title: \"John Smith - Director at Acme | LinkedIn\"\n      const titleMatch = (result.title || '').match(/^([^-|]+)/);\n      if (titleMatch) {\n        decision_maker_name = titleMatch[1].trim();\n      }\n      break;\n    }\n  }\n} catch(e) {\n  console.warn('Serper parse error:', e.message);\n}\n\nreturn [{\n  json: {\n    ...lead,\n    decision_maker_name,\n    decision_maker_linkedin,\n    serper_query: undefined  // clean up temp field\n  }\n}];"
+      },
+      "id": "parse-serper",
+      "name": "Parse Decision-Maker Result",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [3000, 300]
+    },
+
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "=INSERT INTO leads (\n  business_name, category, phone_raw, phone_normalized, address, website,\n  has_website, rating, review_count, source, region, country, preferred_language,\n  ad_copy, original_ad_language, is_running_ads,\n  website_text_excerpt, has_chat_widget,\n  decision_maker_name, decision_maker_linkedin,\n  status\n) VALUES (\n  '{{ ($json.business_name || '').replace(/'/g, \"''\") }}',\n  '{{ $json.category || '' }}',\n  {{ $json.phone_raw ? \"'\" + $json.phone_raw + \"'\" : 'NULL' }},\n  {{ $json.phone_normalized ? \"'\" + $json.phone_normalized + \"'\" : 'NULL' }},\n  {{ $json.address ? \"'\" + ($json.address || '').replace(/'/g, \"''\") + \"'\" : 'NULL' }},\n  {{ $json.website ? \"'\" + $json.website + \"'\" : 'NULL' }},\n  {{ $json.has_website ? 'TRUE' : 'FALSE' }},\n  {{ $json.rating ?? 'NULL' }},\n  {{ $json.review_count ?? 'NULL' }},\n  '{{ $json.source }}',\n  '{{ $json.region }}',\n  '{{ $json.country }}',\n  '{{ $json.preferred_language || 'english' }}',\n  {{ $json.ad_copy ? \"'\" + ($json.ad_copy || '').replace(/'/g, \"''\").substring(0, 5000) + \"'\" : 'NULL' }},\n  {{ $json.original_ad_language ? \"'\" + $json.original_ad_language + \"'\" : 'NULL' }},\n  {{ $json.is_running_ads ? 'TRUE' : 'FALSE' }},\n  {{ $json.website_text_excerpt ? \"'\" + ($json.website_text_excerpt || '').replace(/'/g, \"''\") + \"'\" : 'NULL' }},\n  {{ $json.has_chat_widget ? 'TRUE' : 'FALSE' }},\n  {{ $json.decision_maker_name ? \"'\" + $json.decision_maker_name.replace(/'/g, \"''\") + \"'\" : 'NULL' }},\n  {{ $json.decision_maker_linkedin ? \"'\" + $json.decision_maker_linkedin + \"'\" : 'NULL' }},\n  'pending_approval'\n) RETURNING id",
+        "options": {}
+      },
+      "id": "insert-enriched-lead",
+      "name": "Insert Enriched Lead",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [3200, 300],
+      "credentials": { "postgres": { "name": "Supabase Postgres" } }
+    },
+
+    {
+      "parameters": {
+        "jsCode": "// Build region-aware pain-point detection prompt\nconst lead = $('parse-serper').first().json;\nconst leadId = $input.first().json[0]?.id;\n\nconst regionalCtx = {\n  india: 'WhatsApp is the primary business channel in India. Most SMBs handle enquiries manually, miss leads after hours, and have no follow-up system. Response speed = conversion rate.',\n  AE: 'Gulf (UAE): Higher transaction values, owners are decision-makers, WhatsApp widely used professionally.',\n  QA: 'Gulf (Qatar): Similar to UAE. WhatsApp + professional networks dominate business communication.',\n  SA: 'Saudi Arabia: Relationship-driven business culture. Trust and speed of response are critical.',\n  SG: 'Singapore: English-first, efficiency-focused, SMEs care deeply about customer experience quality.'\n};\nconst ctxKey = lead.country === 'IN' ? 'india' : (lead.country || 'AE');\nconst regionContext = regionalCtx[ctxKey] || regionalCtx['AE'];\n\nconst systemPrompt = `You are a B2B sales researcher for VoxAI Agents, a company that builds AI-powered WhatsApp agents, Voice AI agents, and business automation systems for other businesses.\n\nAnalyze the following business and identify:\n1. Their most likely customer-communication pain point.\n2. The single most compelling, specific angle to open a cold outreach conversation.\n\nRegional context for ${lead.country}: ${regionContext}\nDo NOT mix regional assumptions across countries.\n\nRespond ONLY in this exact JSON format, no preamble, no trailing text:\n{\n  \"pain_point\": \"short description (max 20 words)\",\n  \"angle\": \"specific opening angle referencing something concrete (max 40 words)\",\n  \"confidence\": \"high | medium | low\"\n}`;\n\nconst userContent = `Business details:\n- Name: ${lead.business_name}\n- Category: ${lead.category || 'Unknown'}\n- Region: ${lead.region} (${lead.country})\n- Has website: ${lead.has_website}\n- Website summary: ${lead.website_text_excerpt?.substring(0, 500) || 'N/A'}\n- Has existing chat widget: ${lead.has_chat_widget || false}\n- Running ads: ${lead.is_running_ads || false}\n- Ad copy: ${lead.ad_copy?.substring(0, 300) || 'N/A'}\n- Rating/reviews: ${lead.rating || 'N/A'} (${lead.review_count || 0} reviews)`;\n\nreturn [{ json: { lead_id: leadId, lead, system_prompt: systemPrompt, user_content: userContent } }];"
+      },
+      "id": "build-pain-point-prompt",
+      "name": "Build Pain-Point Prompt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [3400, 300]
+    },
+
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.groq.com/openai/v1/chat/completions",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "=Bearer {{ $env.GROQ_API_KEY }}" },
+            { "name": "content-type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"llama-3.3-70b-versatile\",\n  \"max_tokens\": 400,\n  \"system\": {{ JSON.stringify($json.system_prompt) }},\n  \"messages\": [{ \"role\": \"user\", \"content\": {{ JSON.stringify($json.user_content) }} }]\n}",
+        "options": { "timeout": 30000 }
+      },
+      "id": "claude-pain-point",
+      "name": "Claude: Pain-Point Detection",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [3600, 300]
+    },
+
+    {
+      "parameters": {
+        "jsCode": "const response = $input.first().json;\nconst rawText = response.choices?.[0]?.message?.content || '';\nconst prev = $('build-pain-point-prompt').first().json;\n\nlet parsed = ;\ntry {\n  const cleaned = rawText.replace(/```json\\n?/g, '').replace(/```\\n?/g, '').trim();\n  parsed = JSON.parse(cleaned);\n} catch(e) {\n  console.error('Pain-point parse error:', rawText);\n  parsed = { pain_point: 'Unable to determine', angle: 'Unable to determine', confidence: 'low' };\n}\n\nreturn [{ json: { ...prev, pain_point: parsed.pain_point || '', angle: parsed.angle || '', confidence: parsed.confidence || 'low' } }];"
+      },
+      "id": "parse-pain-point",
+      "name": "Parse Pain-Point",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [3800, 300]
+    },
+
+    {
+      "parameters": {
+        "jsCode": "// Build region + tone aware WhatsApp drafting prompt\nconst data = $input.first().json;\nconst lead = data.lead;\n\nconst toneMap = {\n  IN: \"Casual, Hinglish-friendly where natural — like messaging a fellow business owner on WhatsApp, not writing a formal email. Keep it warm and direct.\",\n  AE: \"Professional English, respectful and direct. No slang. Gulf business culture values formality and clarity.\",\n  QA: \"Professional English, respectful and direct. No slang. Gulf business culture values formality and clarity.\",\n  SA: \"Professional English, respectful and direct. Saudi business culture values relationship and trust. Be polite and clear.\",\n  SG: \"Professional English, concise and efficiency-focused. Singapore SMEs value speed and directness.\"\n};\nconst tone = toneMap[lead.country] || \"Professional English.\";\n\nconst systemPrompt = `Write a short, casual, first-touch WhatsApp outreach message to a business owner.\n\nRules:\n- Under 400 characters total.\n- Do NOT open with \"Hi, we offer...\" or any generic pitch.\n- Do NOT mention \"AI\" or \"automation\" explicitly.\n- Open with something specific referencing their business (use the angle below).\n- Ask one question at the end — goal is a reply, not a sale.\n- Tone: ${tone}\n- Max 1 emoji (optional). No excessive punctuation.\n- No company name or URL in the message.\n\nOutput ONLY the message text. No quotes, no preamble.`;\n\nconst userContent = `Business: ${lead.business_name} (${lead.category}, ${lead.region}, ${lead.country})\nPain point: ${data.pain_point}\nAngle: ${data.angle}`;\n\nreturn [{ json: { ...data, wa_system_prompt: systemPrompt, wa_user_content: userContent } }];"
+      },
+      "id": "build-wa-prompt",
+      "name": "Build WA Draft Prompt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [4000, 200]
+    },
+
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.groq.com/openai/v1/chat/completions",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "=Bearer {{ $env.GROQ_API_KEY }}" },
+            { "name": "content-type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"llama-3.3-70b-versatile\",\n  \"max_tokens\": 200,\n  \"system\": {{ JSON.stringify($json.wa_system_prompt) }},\n  \"messages\": [{ \"role\": \"user\", \"content\": {{ JSON.stringify($json.wa_user_content) }} }]\n}",
+        "options": { "timeout": 30000 }
+      },
+      "id": "claude-wa-draft",
+      "name": "Claude: Draft WhatsApp Message",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [4200, 200]
+    },
+
+    {
+      "parameters": {
+        "jsCode": "const response = $input.first().json;\nconst waDraft = (response.choices?.[0]?.message?.content || '').trim();\nconst prev = $('build-wa-prompt').first().json;\nconst lead = prev.lead;\n\n// Build wa.me deep link\nlet waDeepLink = null;\nif (lead.phone_normalized) {\n  const numericPhone = lead.phone_normalized.replace('+', '');\n  waDeepLink = `https://wa.me/${numericPhone}?text=${encodeURIComponent(waDraft)}`;\n}\n\nreturn [{ json: { ...prev, whatsapp_draft: waDraft, whatsapp_deep_link: waDeepLink } }];"
+      },
+      "id": "parse-wa-draft",
+      "name": "Parse WA Draft + Deep Link",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [4400, 200]
+    },
+
+    {
+      "parameters": {
+        "conditions": {
+          "conditions": [
+            {
+              "leftValue": "={{ $json.lead?.decision_maker_linkedin }}",
+              "rightValue": "",
+              "operator": { "type": "string", "operation": "isNotEmpty" }
+            }
+          ]
+        }
+      },
+      "id": "has-linkedin-dm",
+      "name": "Has LinkedIn Decision Maker?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [4600, 200]
+    },
+
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.groq.com/openai/v1/chat/completions",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "=Bearer {{ $env.GROQ_API_KEY }}" },
+            { "name": "content-type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"llama-3.3-70b-versatile\",\n  \"max_tokens\": 150,\n  \"system\": \"Write a short, professional LinkedIn connection note to a decision-maker at a business.\\n\\nRules:\\n- Under 300 characters total (LinkedIn connection note limit).\\n- Slightly more formal than WhatsApp, but still conversational.\\n- Reference the decision-maker's name if known.\\n- Open with something specific to their business or industry.\\n- End with a soft question or reason to connect — not a pitch.\\n- No emojis. No company URL. No boilerplate like 'I'd love to connect'.\\n\\nOutput ONLY the connection note text. No quotes, no preamble.\",\n  \"messages\": [{ \"role\": \"user\", \"content\": {{ JSON.stringify(`Decision-maker: ${$json.lead?.decision_maker_name || 'Business Owner'}\\nBusiness: ${$json.lead?.business_name} (${$json.lead?.category})\\nPain point: ${$json.pain_point}\\nAngle: ${$json.angle}`) }} }]\n}",
+        "options": { "timeout": 30000 }
+      },
+      "id": "claude-linkedin-draft",
+      "name": "Claude: Draft LinkedIn Note",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [4800, 100]
+    },
+
+    {
+      "parameters": {
+        "jsCode": "// Merge LinkedIn draft (if generated) with the lead data\nconst hasLinkedIn = $('has-linkedin-dm').first().json;\nlet linkedinDraft = null;\n\ntry {\n  const liResp = $input.first().json;\n  linkedinDraft = (liResp.choices?.[0]?.message?.content || '').trim() || null;\n} catch(e) \n\nreturn [{ json: { ...hasLinkedIn, linkedin_draft: linkedinDraft } }];"
+      },
+      "id": "merge-linkedin",
+      "name": "Merge LinkedIn Draft",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [5000, 100]
+    },
+
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "=UPDATE leads SET\n  pain_point = '{{ ($json.pain_point || '').replace(/'/g, \"''\") }}',\n  angle = '{{ ($json.angle || '').replace(/'/g, \"''\") }}',\n  confidence = '{{ $json.confidence || 'low' }}',\n  whatsapp_draft = '{{ ($json.whatsapp_draft || '').replace(/'/g, \"''\") }}',\n  whatsapp_deep_link = {{ $json.whatsapp_deep_link ? \"'\" + $json.whatsapp_deep_link + \"'\" : 'NULL' }},\n  linkedin_draft = {{ $json.linkedin_draft ? \"'\" + ($json.linkedin_draft || '').replace(/'/g, \"''\") + \"'\" : 'NULL' }},\n  enriched_at = NOW(),\n  status = 'pending_approval'\nWHERE id = '{{ $json.lead_id }}'",
+        "options": {}
+      },
+      "id": "final-update",
+      "name": "Final Update: All AI Outputs",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [5200, 300],
+      "credentials": { "postgres": { "name": "Supabase Postgres" } }
+    },
+
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "=INSERT INTO scrape_runs (source, region, query, location, country, leads_found, leads_inserted)\nVALUES ('combined', 'all', 'daily_phase2', 'all_regions', 'all', 0, 1)",
+        "options": {}
+      },
+      "id": "log-run",
+      "name": "Log Scrape Run",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [5400, 300],
+      "credentials": { "postgres": { "name": "Supabase Postgres" } }
+    }
+  ],
+
+  "connections": {
+    "Daily 2AM IST Trigger":        { "main": [[{ "node": "GET Today's Queries", "type": "main", "index": 0 }]] },
+    "GET Today's Queries":          { "main": [[{ "node": "Prepare Branch Data", "type": "main", "index": 0 }]] },
+    "Prepare Branch Data":          { "main": [[
+      { "node": "GMaps Batch — India (30)", "type": "main", "index": 0 },
+      { "node": "GMaps Batch — International (20)", "type": "main", "index": 0 },
+      { "node": "Apify: Start Meta Ads Run — India", "type": "main", "index": 0 },
+      { "node": "Apify: Start Meta Ads Run — International", "type": "main", "index": 0 }
+    ]] },
+    "Apify: Start Meta Ads Run — India":          { "main": [[{ "node": "Wait 90s for Apify Runs", "type": "main", "index": 0 }]] },
+    "Apify: Start Meta Ads Run — International":  { "main": [[{ "node": "Wait 90s for Apify Runs", "type": "main", "index": 0 }]] },
+    "Wait 90s for Apify Runs":      { "main": [[
+      { "node": "Fetch Apify India Results", "type": "main", "index": 0 },
+      { "node": "Fetch Apify International Results", "type": "main", "index": 0 }
+    ]] },
+    "GMaps Batch — India (30)":     { "main": [[{ "node": "Merge All 4 Sources", "type": "main", "index": 0 }]] },
+    "GMaps Batch — International (20)": { "main": [[{ "node": "Merge All 4 Sources", "type": "main", "index": 0 }]] },
+    "Fetch Apify India Results":    { "main": [[{ "node": "Merge All 4 Sources", "type": "main", "index": 0 }]] },
+    "Fetch Apify International Results": { "main": [[{ "node": "Merge All 4 Sources", "type": "main", "index": 0 }]] },
+    "Merge All 4 Sources":          { "main": [[{ "node": "Dedupe: Phone + Fuzzy Name Check", "type": "main", "index": 0 }]] },
+    "Dedupe: Phone + Fuzzy Name Check": { "main": [[{ "node": "Is New Lead?", "type": "main", "index": 0 }]] },
+    "Is New Lead?": { "main": [
+      [{ "node": "Language Tagging", "type": "main", "index": 0 }],
+      [{ "node": "Log Duplicate", "type": "main", "index": 0 }]
+    ]},
+    "Language Tagging":             { "main": [[{ "node": "Has Website?", "type": "main", "index": 0 }]] },
+    "Has Website?": { "main": [
+      [{ "node": "Enrich Website", "type": "main", "index": 0 }],
+      [{ "node": "Build Serper Search Query", "type": "main", "index": 0 }]
+    ]},
+    "Enrich Website":               { "main": [[{ "node": "Merge Website Enrichment", "type": "main", "index": 0 }]] },
+    "Merge Website Enrichment":     { "main": [[{ "node": "Build Serper Search Query", "type": "main", "index": 0 }]] },
+    "Build Serper Search Query":    { "main": [[{ "node": "Serper.dev: LinkedIn Lookup", "type": "main", "index": 0 }]] },
+    "Serper.dev: LinkedIn Lookup":  { "main": [[{ "node": "Parse Decision-Maker Result", "type": "main", "index": 0 }]] },
+    "Parse Decision-Maker Result":  { "main": [[{ "node": "Insert Enriched Lead", "type": "main", "index": 0 }]] },
+    "Insert Enriched Lead":         { "main": [[{ "node": "Build Pain-Point Prompt", "type": "main", "index": 0 }]] },
+    "Build Pain-Point Prompt":      { "main": [[{ "node": "Claude: Pain-Point Detection", "type": "main", "index": 0 }]] },
+    "Claude: Pain-Point Detection": { "main": [[{ "node": "Parse Pain-Point", "type": "main", "index": 0 }]] },
+    "Parse Pain-Point":             { "main": [[{ "node": "Build WA Draft Prompt", "type": "main", "index": 0 }]] },
+    "Build WA Draft Prompt":        { "main": [[{ "node": "Claude: Draft WhatsApp Message", "type": "main", "index": 0 }]] },
+    "Claude: Draft WhatsApp Message": { "main": [[{ "node": "Parse WA Draft + Deep Link", "type": "main", "index": 0 }]] },
+    "Parse WA Draft + Deep Link":   { "main": [[{ "node": "Has LinkedIn Decision Maker?", "type": "main", "index": 0 }]] },
+    "Has LinkedIn Decision Maker?": { "main": [
+      [{ "node": "Claude: Draft LinkedIn Note", "type": "main", "index": 0 }],
+      [{ "node": "Final Update: All AI Outputs", "type": "main", "index": 0 }]
+    ]},
+    "Claude: Draft LinkedIn Note":  { "main": [[{ "node": "Merge LinkedIn Draft", "type": "main", "index": 0 }]] },
+    "Merge LinkedIn Draft":         { "main": [[{ "node": "Final Update: All AI Outputs", "type": "main", "index": 0 }]] },
+    "Final Update: All AI Outputs": { "main": [[{ "node": "Log Scrape Run", "type": "main", "index": 0 }]] }
+  },
+
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner"
+  },
+  "tags": ["voxai", "phase2", "outbound"],
+  "_meta": { "instanceId": "replace-with-your-n8n-instance-id" }
+}

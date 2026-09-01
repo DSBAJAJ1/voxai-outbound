@@ -1,0 +1,83 @@
+== WHATSAPP PROMPT ==
+
+Write a short, casual, first-touch WhatsApp outreach message to a business owner.
+
+Rules:
+- Under 400 characters total.
+- Do NOT open with "Hi, we offer..." or any generic pitch.
+- Do NOT mention "AI" or "automation" explicitly — focus on the pain point and outcome.
+- Open with something specific referencing their business (use the angle below).
+- Ask one question at the end rather than making a hard pitch — the goal is a reply,
+  not a sale in message one.
+- Tone: {{tone_instruction}}
+- Max 1 emoji (optional). No excessive punctuation.
+- Do not sign off with a company name or website link.
+
+Business: {{business_name}} ({{category}}, {{region}}, {{country}})
+Pain point: {{pain_point}}
+Angle: {{angle}}
+
+Output ONLY the message text. No quotes, no preamble, no explanation.
+
+
+== LINKEDIN PROMPT ==
+
+Write a short, professional LinkedIn connection note to a decision-maker at a business.
+
+Rules:
+- Under 300 characters total (LinkedIn connection note limit).
+- Slightly more formal than WhatsApp, but still conversational.
+- Reference the decision-maker's name and title if known (provided below).
+- Open with something specific to their business or industry.
+- End with a soft question or reason to connect — not a pitch.
+- No emojis. No company URL. No "I'd love to connect" boilerplate.
+
+Decision-maker: {{decision_maker_name}} ({{decision_maker_title}})
+Business: {{business_name}} ({{category}})
+Pain point: {{pain_point}}
+Angle: {{angle}}
+
+Output ONLY the connection note text. No quotes, no preamble, no explanation.
+
+
+== TONE INSTRUCTIONS BY REGION ==
+(Used to populate {{tone_instruction}} in the WhatsApp prompt)
+
+india:
+  "Casual, Hinglish-friendly where natural — like you're messaging a fellow business
+   owner on WhatsApp, not writing a formal email. Keep it warm and direct."
+
+uae:
+  "Professional English, respectful and direct. No slang. Gulf business culture
+   values formality and clarity. Keep it crisp."
+
+qa:
+  "Professional English, respectful and direct. No slang. Gulf business culture
+   values formality and clarity. Keep it crisp."
+
+sa:
+  "Professional English, respectful and direct. No slang. Saudi business culture
+   values relationship and trust. Be polite and clear."
+
+sg:
+  "Professional English, concise and efficiency-focused. Singapore SMEs value
+   speed and directness. Get to the point fast."
+
+
+== FOLLOW-UP PROMPT (Layer 8) ==
+
+Write a gentle follow-up WhatsApp message for a business owner who hasn't replied
+to an initial outreach message sent {{days_since_sent}} days ago.
+
+Rules:
+- Under 300 characters.
+- Do NOT repeat or paraphrase the original message.
+- Do NOT be pushy or reference "following up" explicitly — keep it light.
+- Tone: {{tone_instruction}}
+- No emojis. End with a question or an easy invitation to reply.
+
+Business: {{business_name}} ({{category}}, {{region}})
+Original pain point: {{pain_point}}
+Original angle: {{angle}}
+
+Output ONLY the follow-up message text. No quotes, no preamble, no explanation.
