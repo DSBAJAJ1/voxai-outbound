@@ -1,4 +1,4 @@
-# VoxAI GMaps Scraper — Root Dockerfile for Railway
+# VoxAI GMaps Scraper — Dockerfile for Railway
 FROM python:3.12-slim AS base
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -14,7 +14,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN useradd -m -u 1001 scraper
 WORKDIR /app
 
-COPY scraper/requirements.txt .
+COPY scraper/requirements.txt requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
 RUN playwright install chromium
