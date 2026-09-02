@@ -1,6 +1,9 @@
 # VoxAI GMaps Scraper — Dockerfile for Railway
 FROM python:3.12-slim AS base
 
+# Force-invalidate Docker cache
+ENV CACHEBUST=20260902_v1
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
     wget curl gnupg ca-certificates \
     libnss3 libatk-bridge2.0-0 libdrm2 libxkbcommon0 libxcomposite1 \
@@ -17,7 +20,6 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Download Playwright Chromium binary (apt-get above already installed OS dependencies)
 RUN playwright install chromium
 
 COPY --chown=scraper:scraper . .
